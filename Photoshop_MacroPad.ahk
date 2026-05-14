@@ -25,7 +25,7 @@ if not A_IsAdmin
 }
 
 ; Приветственное уведомление при успешном запуске от имени Админа
-ToolTip, 🎨 PS MacroPad Controller v1.0`nby [andrey-arttech] успешно запущен!
+ToolTip, 🎨 PS MacroPad Controller v2.4`nby [andrey-arttech] успешно запущен!
 SetTimer, RemoveToolTip, -3000 ; Исчезнет через 3 секунды
 
 ; --- БЛОК ИНИЦИАЛИЗАЦИИ ГЛОБАЛЬНЫХ ПЕРЕМЕННЫХ ---
@@ -50,66 +50,75 @@ global AltPressed := 0
 
 #IfWinActive ahk_exe Photoshop.exe ; --- ВСЕ КЛАВИШИ НИЖЕ РАБОТАЮТ ТОЛЬКО В PHOTOSHOP ---
 
-; --- ИНТЕРАКТИВНАЯ ПИПЕТКА (ВАРИАНТ 1 С ЖИРНЫМИ ЦИФРАМИ) ---
+; --- ИНТЕРАКТИВНАЯ ПИПЕТКА (ОПТИМИЗИРОВАННАЯ ПОД ГРАФИЧЕСКИЕ ПЛАНШЕТЫ) ---
 
-; Этап 1. Ловим зажатие Alt (тихо фиксируем цвет "БЫЛО")
+; Этап 1. Ловим зажатие Alt (только для Кисти и Ластика)
 ~*Alt::
     if (AltPressed = 1) 
         return
+        
+    ; Если в руках лассо или другой софт — не мешаем стандартному вычитанию
+    if (!IsBrushOrEraser())
+        return
+        
     AltPressed := 1
     GetRawHSB(Old_H, Old_S, Old_B)
 return
 
-; Сбрасываем флаг, когда Alt отпустили
 ~*Alt Up::
     AltPressed := 0
 return
 
-; Этап 2. Ловим клик мыши при зажатом Alt (считываем "СТАЛО" и выводим сравнение)
+; Этап 2А. Ловим стандартный клик мыши
 ~*~LButton::
     if (AltPressed = 0) 
         return
-        
-    ; Короткая пауза для стабильного считывания
-    Sleep, 120 
+    GoSub, ProcessColorSample
+return
+
+; Этап 2Б. ДОПОЛНИТЕЛЬНО: Ловим физический клик пера/стилуса (команда LButton при зажатом Alt)
+~*!LButton::
+    if (AltPressed = 0) 
+        return
+    GoSub, ProcessColorSample
+return
+
+; Единый блок обработки взятия пробы цвета
+ProcessColorSample:
+    Sleep, 180 ; Стабилизированная пауза для одновременной обработки давления пера и клика
     
-    ; Считываем новый цвет
     GetRawHSB(new_H, new_S, new_B)
     
-    ; Вычисляем разницу параметров
-    diff_H := new_H - Old_H
-    diff_S := new_S - Old_S
-    diff_B := new_B - Old_B
+    ; Страховка: если по какой-то причине всё же проскочили нули — полностью блокируем обновление HUD,
+    ; чтобы не портить статистику на экране ложным "Черным" цветом
+    if (new_H = 0 && new_S = 0 && new_B = 0 && Old_B > 15) {
+        AltPressed := 0
+        return
+    }
     
-    ; Форматируем отображение дельты для Тона, Насыщенности и Яркости
+    diff_H := new_H - Old_H
+    
     str_diff_H := (diff_H > 0) ? "▲" . diff_H . "°" : (diff_H < 0) ? "▼" . Abs(diff_H) . "°" : "="
     str_diff_S := (diff_S > 0) ? "▲" . diff_S . "%" : (diff_S < 0) ? "▼" . Abs(diff_S) . "%" : "="
     str_diff_B := (diff_B > 0) ? "▲" . diff_B . "%" : (diff_B < 0) ? "▼" . Abs(diff_B) . "%" : "="
     
-    ; Конвертируем HSB в RGB для новой пробы цвета
     HSB_to_RGB(new_H, new_S, new_B, R, G, B)
-    
-    ; Получаем текстовые названия цветов
     oldName := ParseExtendedColor(Old_H, Old_S, Old_B)
     newName := ParseExtendedColor(new_H, new_S, new_B)
     
-    ; Переводим новые (текущие) значения в псевдо-жирный Юникод
     b_H := ToBold(new_H)
     b_S := ToBold(new_S)
     b_B := ToBold(new_B)
     
-    ; Собираем лаконичный двухстрочный HUD
-   hudText := "🎨 " . newName . "`n"
+    hudText := "🎨 " . newName . "`n"
             . "⭕ " . b_H . "° [" . str_diff_H . "] | 💧 " . b_S . "% [" . str_diff_S . "] | 💡 " . b_B . "% [" . str_diff_B . "]`n"
             . "🖥️ RGB: [" . R . ", " . G . ", " . B . "]"
     ShowTip(hudText)
     
-    ; Перезаписываем базу для следующего сэмпла
     Old_H := new_H
     Old_S := new_S
     Old_B := new_B
 return
-
 
 ; --- РУЧКА 1 (ТОН / НЕПРОЗРАЧНОСТЬ КИСТИ) ---
 F20:: 
@@ -324,15 +333,23 @@ ToBold(num) {
 
 ; Быстрое чтение HSB без изменения цвета
 GetRawHSB(ByRef h, ByRef s, ByRef b) {
-    try {
-        app := ComObjActive("Photoshop.Application")
-        hsb := app.ForegroundColor.HSB
-        h := Round(hsb.Hue)
-        s := Round(hsb.Saturation)
-        b := Round(hsb.Brightness)
-        return
+    Loop, 3 ; Делаем до 3 быстрых попыток считать цвет, если система занята
+    {
+        try {
+            app := ComObjActive("Photoshop.Application")
+            hsb := app.ForegroundColor.HSB
+            h := Round(hsb.Hue)
+            s := Round(hsb.Saturation)
+            b := Round(hsb.Brightness)
+            
+            ; Если считались не нули, или если старый цвет действительно был черным — выходим успешно
+            if (h != 0 || s != 0 || b != 0 || Old_B <= 15)
+                return
+        }
+        Sleep, 30 ; Микропауза между попытками, чтобы дать COM-шине очиститься
     }
-    h := 0, s := 0, b := 0
+    ; Если даже после 3 попыток вернулся ноль, берем безопасное прошлое значение, чтобы HUD не моргал черным
+    h := Old_H, s := Old_S, b := Old_B
 }
 
 ; Изменяет HSB в Photoshop и возвращает точные параметры текущего цвета
@@ -509,4 +526,33 @@ GetBrushSize() {
     } catch {
         return "?"
     }
+}
+
+; Ультимативная проверка инструмента И зоны экрана (защита от кликов по слоям)
+IsBrushOrEraser() {
+    ; 1. ПРОВЕРКА ЗОНЫ: Проверяем, где физически находится курсор мыши
+    MouseGetPos,,, TaskWindow, TaskControl
+    WinGetClass, windowClass, ahk_id %TaskWindow%
+    
+    ; Если класс управления содержит "OWL" (панели) или "Dock" (боковые доки слоев),
+    ; либо это не внутреннее окно холста (в Photoshop окна холста содержат "MDI" или "3D")
+    if (InStr(TaskControl, "Tab") || InStr(TaskControl, "Dock") || InStr(TaskControl, "Owl") || InStr(TaskControl, "Tree"))
+        return false ; Мышь над интерфейсом/слоями — полностью блокируем пипетку
+        
+    ; 2. ПРОВЕРКА ИНСТРУМЕНТА: Если мышь над холстом, опрашиваем Photoshop
+    try {
+        app := ComObjActive("Photoshop.Application")
+        
+        js := "var r = new ActionReference(); r.putProperty(charIDToTypeID('Prpr'), stringIDToTypeID('tool')); r.putEnumerated(charIDToTypeID('capp'), charIDToTypeID('Ordn'), charIDToTypeID('Trgt')); typeIDToStringID(executeActionGet(r).getEnumerationType(stringIDToTypeID('tool')));"
+        
+        tName := "" . app.doJavaScript(js)
+        
+        if (tName = "")
+            return true
+            
+        StringLower, toolName, tName
+        if (InStr(toolName, "brush") || InStr(toolName, "eraser"))
+            return true
+    }
+    return false
 }
